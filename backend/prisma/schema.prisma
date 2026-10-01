@@ -1,0 +1,1112 @@
+// =====================================================================================
+// DriveShare Backend — Prisma Schema
+// Covers all data models from the 12-domain Backend Architecture Specification.
+// One physical database is used for simplicity of local dev; in production each
+// service domain would own its own schema/database with the event bus as the
+// integration surface (per the spec's "Cross-Service Contracts" section).
+// =====================================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------- Core / Shared -------------------------------------
+
+enum UserRole {
+  user
+  support_agent
+  arbitrator
+  admin
+  service
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String
+  role          UserRole @default(user)
+  phone         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations (back-references only; ownership enforced in service layer)
+  verificationSessions VerificationSession[]
+  licenseRecords       LicenseRecord[]
+  drivingHistoryReports DrivingHistoryReport[]
+  trustScore           TrustScore?
+  vehicles             Vehicle[]
+  paymentMethods       PaymentMethod[]
+  consents             ConsentRecord[]
+  companyProfile       CompanyProfile?
+}
+
+// Added per explicit product decision (verification-check follow-up, "company/
+// business profile" gap): a minimal, additive business-profile entity. Scope is
+// deliberately narrow — see company-profile.service.ts and the implementation
+// summary for what is explicitly NOT covered (multi-staff seats, KYB/business
+// verification, a separate billing entity) and why those are flagged rather than
+// guessed at. 1:1 with User for this minimal version: one company profile is
+// administered by exactly one individual account, not a team of logins.
+model CompanyProfile {
+  id          String    @id @default(uuid())
+  ownerUserId String    @unique
+  owner       User      @relation(fields: [ownerUserId], references: [id])
+  name        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  vehicles    Vehicle[]
+}
+
+// ------------------------------- 1. Identity & Verification -------------------------
+
+enum VerificationStatus {
+  pending
+  doc_uploaded
+  liveness_submitted
+  in_review
+  approved
+  rejected
+  expired
+}
+
+enum DocumentType {
+  passport
+  drivers_license
+  national_id
+}
+
+model VerificationSession {
+  id                String             @id @default(uuid())
+  userId            String
+  user              User               @relation(fields: [userId], references: [id])
+  status            VerificationStatus @default(pending)
+  documentType      DocumentType
+  documentTokenRef  String?
+  livenessScore     Float?
+  vendorRef         String?
+  rejectionReason   String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+}
+
+enum DmvValidationStatus {
+  valid
+  invalid
+  suspended
+  unknown
+  pending
+}
+
+model LicenseRecord {
+  id                   String              @id @default(uuid())
+  userId               String
+  user                 User                @relation(fields: [userId], references: [id])
+  licenseNumberEnc     String // encrypted at rest via app-layer envelope encryption
+  issuingRegion        String
+  licenseClass         String
+  expirationDate       DateTime
+  dmvValidationStatus  DmvValidationStatus @default(pending)
+  lastValidatedAt      DateTime?
+  createdAt            DateTime            @default(now())
+}
+
+enum RiskTier {
+  low
+  medium
+  high
+}
+
+model DrivingHistoryReport {
+  id                    String   @id @default(uuid())
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id])
+  consentTokenId        String
+  violationCount        Int      @default(0)
+  atFaultAccidentCount  Int      @default(0)
+  suspensionFlag        Boolean  @default(false)
+  riskTier              RiskTier @default(low)
+  rawReportTokenRef     String?
+  requestedAt           DateTime @default(now())
+  completedAt           DateTime?
+}
+
+// ------------------------------- 2. Trust Score --------------------------------------
+
+enum TrustTier {
+  new
+  standard
+  trusted
+  elite
+}
+
+model TrustScore {
+  userId            String    @id
+  user              User      @relation(fields: [userId], references: [id])
+  overallScore      Float     @default(300)
+  factorBreakdown   Json      @default("{}")
+  tier              TrustTier @default(new)
+  lastCalculatedAt  DateTime  @default(now())
+  scoreVersion      Int       @default(1)
+}
+
+enum ImportStatus {
+  pending
+  verified
+  rejected
+}
+
+model ExternalHistoryImport {
+  id                 String       @id @default(uuid())
+  userId             String
+  sourcePlatform     String
+  verificationMethod String // oauth_pull | document_upload
+  status             ImportStatus @default(pending)
+  weightApplied      Float        @default(0)
+  createdAt          DateTime     @default(now())
+}
+
+model ListingTrustThreshold {
+  listingId     String  @id
+  minimumScore  Float   @default(0)
+  minimumTier   TrustTier?
+}
+
+// ------------------------------- 3. Vehicle & Listing --------------------------------
+
+enum VehicleStatus {
+  active
+  inactive
+  under_review
+  suspended
+}
+
+enum OwnershipVerificationStatus {
+  pending
+  verified
+  rejected
+}
+
+// Audit §3 Critical / §1 Critical: Vehicle previously had no way to represent
+// how the vehicle physically drives or is powered, which search, the listing
+// detail page, and the spec sheet all depend on.
+enum TransmissionType {
+  automatic
+  manual
+}
+
+enum FuelType {
+  gasoline
+  diesel
+  hybrid
+  electric
+}
+
+model Vehicle {
+  id                          String                      @id @default(uuid())
+  ownerId                     String
+  owner                       User                        @relation(fields: [ownerId], references: [id])
+  vin                         String                      @unique
+  licensePlateEnc             String
+  make                        String
+  model                       String
+  year                        Int
+  trim                        String?
+  // --- Spec fields (audit §3 High: "no specs surfaced") ---
+  seats                       Int?
+  transmission                TransmissionType?
+  fuelType                    FuelType?
+  mileageLimitPerDay          Int?
+  features                    String[]                    @default([])
+  ownershipDocTokenRef        String?
+  ownershipVerificationStatus OwnershipVerificationStatus @default(pending)
+  telematicsDeviceId          String?
+  status                      VehicleStatus                @default(inactive)
+  createdAt                   DateTime                    @default(now())
+  updatedAt                   DateTime                    @updatedAt
+
+  listings           Listing[]
+  conditionBaselines ConditionBaseline[]
+  accessDevice       AccessDevice?
+  photos             VehiclePhoto[]
+
+  // Added per explicit product decision (verification-check follow-up, "company/
+  // business profile" gap): nullable so every existing individually-owned vehicle
+  // is unaffected — a vehicle only belongs to a company profile once its owner
+  // explicitly assigns it (CompanyProfileService.assignVehicle).
+  companyProfileId   String?
+  companyProfile     CompanyProfile?     @relation(fields: [companyProfileId], references: [id], onDelete: SetNull)
+}
+
+// Audit §3 Critical / §1 Critical: "No vehicle photography anywhere" — every
+// listing rendered the same generic icon because no photo storage existed.
+// Modeled as its own table (rather than a bare String[] on Vehicle) so photos
+// carry an explicit display order and can be added/removed independently of
+// updating the vehicle record itself.
+model VehiclePhoto {
+  id        String   @id @default(uuid())
+  vehicleId String
+  vehicle   Vehicle  @relation(fields: [vehicleId], references: [id])
+  url       String
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([vehicleId, position])
+}
+
+enum ConditionBaselineType {
+  listing_baseline
+  pre_trip
+  post_trip
+}
+
+model ConditionBaseline {
+  id                 String                @id @default(uuid())
+  vehicleId          String
+  vehicle            Vehicle               @relation(fields: [vehicleId], references: [id])
+  tripId             String?
+  type               ConditionBaselineType
+  mediaAssetRefs     String[]
+  aiDamageAnnotations Json                 @default("[]")
+  odometerReading    Int?
+  fuelOrChargeLevel  Float?
+  capturedAt         DateTime              @default(now())
+}
+
+enum ListingStatus {
+  draft
+  active
+  paused
+  removed
+}
+
+model Listing {
+  id                  String        @id @default(uuid())
+  vehicleId           String
+  vehicle             Vehicle       @relation(fields: [vehicleId], references: [id])
+  ownerId             String
+  basePriceCents      Int
+  currency            String        @default("USD")
+  // Audit §3 Critical: "no description field anywhere in schema or UI".
+  description         String?
+  // Audit §3 Critical / §1 Critical / §4 Critical: no location field existed
+  // anywhere, so search could never be map-based, proximity-ranked, or even
+  // display where a vehicle is before booking.
+  locationLat         Float?
+  locationLng         Float?
+  locationLabel       String?
+  instantBookEnabled  Boolean       @default(true)
+  deliveryOptions     Json          @default("{\"delivery\": false, \"radius_km\": 0, \"fee\": 0}")
+  minimumTrustTier    TrustTier?
+  status              ListingStatus @default(draft)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  availability AvailabilityCalendar[]
+
+  @@index([locationLat, locationLng])
+}
+
+enum AvailabilityStatus {
+  available
+  booked
+  owner_blocked
+  maintenance_hold
+}
+
+model AvailabilityCalendar {
+  id        String             @id @default(uuid())
+  listingId String
+  listing   Listing            @relation(fields: [listingId], references: [id])
+  date      DateTime
+  status    AvailabilityStatus @default(available)
+
+  @@unique([listingId, date])
+}
+
+// ------------------------------- 4. Access & IoT --------------------------------------
+
+enum AccessDeviceType {
+  aftermarket_smart_lock
+  native_connected_car_api
+}
+
+model AccessDevice {
+  id              String           @id @default(uuid())
+  vehicleId       String           @unique
+  vehicle         Vehicle          @relation(fields: [vehicleId], references: [id])
+  deviceType      AccessDeviceType
+  vendorRef       String
+  firmwareVersion String?
+  lastHeartbeatAt DateTime?
+}
+
+enum DigitalKeyStatus {
+  pending
+  active
+  expired
+  revoked
+}
+
+model DigitalKey {
+  id            String           @id @default(uuid())
+  tripId        String           @unique
+  vehicleId     String
+  renterId      String
+  validFrom     DateTime
+  validUntil    DateTime
+  geofenceId    String?
+  status        DigitalKeyStatus @default(pending)
+  cryptoTokenRef String
+  createdAt     DateTime         @default(now())
+}
+
+enum BreachAction {
+  alert_only
+  alert_and_flag_dispute
+}
+
+model GeofenceRule {
+  id           String       @id @default(uuid())
+  vehicleId    String
+  tripId       String
+  polygon      Json
+  breachAction BreachAction @default(alert_only)
+}
+
+enum TelematicsEventType {
+  tow_detected
+  tamper_detected
+  geofence_breach
+  diagnostic_code
+  unexpected_disconnect
+}
+
+model TelematicsEvent {
+  id           String              @id @default(uuid())
+  vehicleId    String
+  eventType    TelematicsEventType
+  payload      Json
+  occurredAt   DateTime            @default(now())
+  resolvedFlag Boolean             @default(false)
+}
+
+// ------------------------------- 5. Data Security & Compliance ------------------------
+
+enum DocumentClass {
+  id_doc
+  license
+  ownership_doc
+  driving_history_report
+  other
+}
+
+enum RetentionPolicy {
+  standard
+  extended_legal_hold
+}
+
+model TokenizedDocument {
+  token             String          @id @default(uuid())
+  ownerUserId       String
+  documentClass     DocumentClass
+  encryptedBlobRef  String
+  kmsKeyId          String
+  retentionPolicy   RetentionPolicy @default(standard)
+  createdAt         DateTime        @default(now())
+}
+
+model ConsentRecord {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  consentType  String
+  grantedAt    DateTime  @default(now())
+  revokedAt    DateTime?
+  ipAddress    String?
+  userAgent    String?
+}
+
+enum DataLifecycleType {
+  export
+  delete
+}
+
+enum DataLifecycleStatus {
+  pending
+  processing
+  completed
+  rejected
+}
+
+model DataLifecycleRequest {
+  id               String               @id @default(uuid())
+  userId           String
+  type             DataLifecycleType
+  status           DataLifecycleStatus  @default(pending)
+  rejectionReason  String?
+  createdAt        DateTime             @default(now())
+  completedAt      DateTime?
+}
+
+model AccessAuditLogEntry {
+  id             String   @id @default(uuid())
+  actorId        String
+  actorRole      String
+  resourceToken  String
+  action         String // read | write | delete
+  occurredAt     DateTime @default(now())
+}
+
+// ------------------------------- 6. Payments & Escrow ----------------------------------
+
+enum PaymentMethodType {
+  card
+  bank_account
+  wallet
+}
+
+enum PaymentMethodStatus {
+  active
+  expired
+  removed
+}
+
+model PaymentMethod {
+  id             String              @id @default(uuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id])
+  processorToken String
+  type           PaymentMethodType
+  // Audit §5 item 5: PaymentMethods.tsx rendered `JSON.stringify(r.rawDetails
+  // ?? r.details ?? {})` in a table cell, but the raw card details were never
+  // actually persisted anywhere (the processor only ever returned an opaque
+  // token) — so that cell always rendered "{}" regardless. These two
+  // display-safe fields are what a real processor (Stripe et al.) hands back
+  // alongside the token: never the PAN itself, just enough to render a
+  // recognizable card row.
+  brand          String?
+  last4          String?
+  status         PaymentMethodStatus @default(active)
+  createdAt      DateTime            @default(now())
+}
+
+enum AuthorizationStatus {
+  authorized
+  captured
+  voided
+  failed
+}
+
+model PaymentAuthorization {
+  id           String              @id @default(uuid())
+  tripId       String
+  payerUserId  String
+  amountCents  Int
+  currency     String              @default("USD")
+  status       AuthorizationStatus @default(authorized)
+  processorRef String
+  authorizedAt DateTime            @default(now())
+  capturedAt   DateTime?
+}
+
+enum DepositStatus {
+  held
+  released
+  partially_captured
+  fully_captured
+}
+
+model DepositHold {
+  id            String        @id @default(uuid())
+  tripId        String
+  amountCents   Int
+  currency      String        @default("USD")
+  status        DepositStatus @default(held)
+  captureReason String?
+  createdAt     DateTime      @default(now())
+}
+
+enum PayoutStatus {
+  scheduled
+  processing
+  paid
+  failed
+}
+
+model Payout {
+  id                  String       @id @default(uuid())
+  ownerId             String
+  tripId              String
+  amountCents         Int
+  platformFeeCents    Int
+  currency            String       @default("USD")
+  status              PayoutStatus @default(scheduled)
+  scheduledReleaseAt  DateTime
+  createdAt           DateTime     @default(now())
+}
+
+enum LedgerEntryType {
+  rental_fee
+  insurance_fee
+  delivery_fee
+  deposit
+  fee_adjustment
+  refund
+  payout
+}
+
+model TransactionLedgerEntry {
+  id          String          @id @default(uuid())
+  tripId      String
+  entryType   LedgerEntryType
+  amountCents Int
+  currency    String          @default("USD")
+  createdAt   DateTime        @default(now())
+}
+
+// ------------------------------- 7. Fraud Detection --------------------------------------
+
+enum RiskDecision {
+  allow
+  review
+  block
+}
+
+model RiskEvaluation {
+  id          String       @id @default(uuid())
+  subjectType String // booking | listing | user
+  subjectId   String
+  userId      String?      // the acting user, distinct from subjectId (e.g. for subjectType='booking', subjectId is the tripId being evaluated, not the user triggering it)
+  riskScore   Float
+  signals     Json         @default("{}")
+  decision    RiskDecision
+  evaluatedAt DateTime     @default(now())
+}
+
+enum FraudCaseType {
+  payment_fraud
+  staged_damage
+  identity_sharing
+  collusion_ring
+  listing_fraud
+}
+
+enum FraudCaseStatus {
+  open
+  under_review
+  confirmed
+  dismissed
+}
+
+model FraudCase {
+  id              String          @id @default(uuid())
+  relatedUserIds  String[]
+  caseType        FraudCaseType
+  status          FraudCaseStatus @default(open)
+  evidenceRefs    String[]
+  createdAt       DateTime        @default(now())
+  resolvedAt      DateTime?
+}
+
+model DeviceSignal {
+  id                       String   @id @default(uuid())
+  userId                   String
+  deviceFingerprint        String
+  behavioralBiometricScore Float
+  ipGeoMismatchFlag        Boolean  @default(false)
+  createdAt                DateTime @default(now())
+}
+
+model ChargebackEvidenceBundle {
+  id                    String   @id @default(uuid())
+  tripId                String
+  includedArtifacts     String[]
+  generatedAt           DateTime @default(now())
+  submittedToProcessor  Boolean  @default(false)
+}
+
+// ------------------------------- 8. Insurance & Liability ---------------------------------
+
+enum CoverageTierName {
+  baseline
+  standard
+  premium
+}
+
+model CoverageTier {
+  id                  String           @id @default(uuid())
+  name                CoverageTierName
+  deductibleCents     Int
+  liabilityLimitCents BigInt
+  basePriceMultiplier Float
+}
+
+model InsuranceQuote {
+  id             String   @id @default(uuid())
+  tripId         String
+  tierId         String
+  riskFactorsUsed Json    @default("{}")
+  quotedPriceCents Int
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+}
+
+enum PolicyStatus {
+  quoted
+  bound
+  active
+  expired
+  voided
+}
+
+model Policy {
+  id                       String       @id @default(uuid())
+  tripId                   String       @unique
+  tierId                   String
+  comprehensionCheckPassed Boolean      @default(false)
+  status                   PolicyStatus @default(quoted)
+  carrierRef               String?
+  createdAt                DateTime     @default(now())
+}
+
+model ComprehensionCheckAttempt {
+  id           String   @id @default(uuid())
+  userId       String
+  tripId       String
+  passed       Boolean
+  attemptCount Int      @default(1)
+  createdAt    DateTime @default(now())
+}
+
+enum ClaimType {
+  vehicle_damage
+  liability
+  theft
+}
+
+enum ClaimStatus {
+  filed
+  under_review
+  approved
+  denied
+  paid
+}
+
+model Claim {
+  id               String      @id @default(uuid())
+  policyId         String
+  tripId           String
+  claimType        ClaimType
+  status           ClaimStatus @default(filed)
+  evidenceRefs     String[]
+  payoutAmountCents Int?
+  createdAt        DateTime    @default(now())
+}
+
+// ------------------------------- 9. Dispute Resolution ---------------------------------------
+
+enum DisputeType {
+  damage
+  mileage
+  late_return
+  cleanliness
+  billing
+  other
+}
+
+enum DisputeTier {
+  auto_review
+  mediator_review
+  arbitration
+}
+
+enum DisputeStatus {
+  open
+  resolved_auto
+  resolved_mediator
+  resolved_arbitration
+  withdrawn
+}
+
+model DisputeCase {
+  id                 String        @id @default(uuid())
+  tripId             String
+  filedByUserId      String
+  disputeType        DisputeType
+  tier               DisputeTier   @default(auto_review)
+  status             DisputeStatus @default(open)
+  resolutionOutcome  Json?
+  createdAt          DateTime      @default(now())
+  resolvedAt         DateTime?
+
+  evidenceItems      EvidenceItem[]
+  mediatorDecisions  MediatorDecision[]
+}
+
+model EvidenceItem {
+  id                 String      @id @default(uuid())
+  disputeId          String
+  dispute            DisputeCase @relation(fields: [disputeId], references: [id])
+  sourceType         String
+  refPointer         String
+  submittedByUserId  String?
+  createdAt          DateTime    @default(now())
+}
+
+model MediatorDecision {
+  id              String      @id @default(uuid())
+  disputeId       String
+  dispute         DisputeCase @relation(fields: [disputeId], references: [id])
+  mediatorId      String
+  decisionSummary String
+  decidedAt       DateTime    @default(now())
+}
+
+// ------------------------------- 10. Pricing Engine -------------------------------------------
+
+model PriceSuggestion {
+  id              String   @id @default(uuid())
+  listingId       String
+  suggestedPriceCents Int
+  factorsUsed     Json     @default("{}")
+  validUntil      DateTime
+  createdAt       DateTime @default(now())
+}
+
+model IdleRecommendation {
+  id                 String   @id @default(uuid())
+  listingId          String
+  recommendationType String // lower_price | enable_delivery | relocate_suggestion
+  projectedImpact    Json     @default("{}")
+  createdAt          DateTime @default(now())
+}
+
+model CancellationRiskScore {
+  tripId              String   @id
+  riskScore           Float
+  mitigationSuggested String // offer_backup_vehicle | flexible_rebooking | none
+  createdAt           DateTime @default(now())
+}
+
+model SurgeCapPolicy {
+  id            String @id @default(uuid())
+  marketRegion  String @unique
+  maxMultiplier Float
+}
+
+// ------------------------------- 11. Logistics & Fleet ------------------------------------------
+
+enum DeliveryStatus {
+  requested
+  assigned
+  in_progress
+  completed
+  cancelled
+}
+
+enum DeliveryAssignee {
+  owner
+  third_party_partner
+}
+
+model DeliveryRequest {
+  id              String           @id @default(uuid())
+  tripId          String
+  dropoffLocation Json
+  feeCents        Int
+  status          DeliveryStatus   @default(requested)
+  assignedTo      DeliveryAssignee?
+  createdAt       DateTime         @default(now())
+}
+
+model FleetRedistributionSuggestion {
+  id                String   @id @default(uuid())
+  vehicleId         String
+  suggestedZone     Json
+  demandHeatmapScore Float
+  createdAt         DateTime @default(now())
+}
+
+enum MaintenanceReason {
+  scheduled_service
+  diagnostic_flag
+  recall
+}
+
+model MaintenanceHold {
+  id                        String            @id @default(uuid())
+  vehicleId                 String
+  reason                    MaintenanceReason
+  startDate                 DateTime
+  endDate                   DateTime
+  triggeringDiagnosticCode  String?
+  createdAt                 DateTime          @default(now())
+}
+
+// ------------------------------- 12. Reviews & Reputation --------------------------------------
+
+enum ReviewVisibility {
+  hidden_pending_counterpart
+  hidden_pending_window
+  visible
+}
+
+model Review {
+  id             String           @id @default(uuid())
+  tripId         String
+  authorUserId   String
+  subjectUserId  String
+  rating         Int
+  comment        String?
+  mediaRefs      String[]
+  visibility     ReviewVisibility @default(hidden_pending_counterpart)
+  submittedAt    DateTime         @default(now())
+  revealedAt     DateTime?
+
+  @@unique([tripId, authorUserId])
+}
+
+enum BadgeType {
+  super_host
+  elite_renter
+}
+
+model BadgeStatus {
+  id                    String    @id @default(uuid())
+  userId                String
+  badgeType             BadgeType
+  earnedAt              DateTime?
+  rollingWindowMetrics  Json      @default("{}")
+
+  @@unique([userId, badgeType])
+}
+
+// =====================================================================================
+// 13. Admin & Operations ([INFERRED] domain — added on top of the original 12-domain
+// spec to support internal managerial/operational needs: granular staff permissions,
+// assessments, monitoring, moderation, financial/compliance reporting, configuration
+// management, and incident/alerting. Reads across all 12 existing domains rather than
+// duplicating their data; writes only to the models below.)
+// =====================================================================================
+
+enum StaffCapability {
+  view_financials
+  manage_staff
+  immobilize_vehicles
+  resolve_disputes
+  moderate_content
+  manage_config
+  view_audit_log
+  suspend_users
+  override_trust_score
+  manage_incidents
+  impersonate_users
+}
+
+model StaffPermission {
+  id          String          @id @default(uuid())
+  userId      String
+  capability  StaffCapability
+  grantedBy   String
+  grantedAt   DateTime        @default(now())
+  revokedAt   DateTime?
+  revokedBy   String?
+
+  @@unique([userId, capability])
+}
+
+// Distinct from AccessAuditLogEntry (Section 5, which logs raw document reads/writes):
+// this captures higher-level managerial actions (suspensions, overrides, impersonation,
+// config changes) each with a mandatory human-readable reason for accountability.
+model AdminAuditLog {
+  id          String   @id @default(uuid())
+  actorId     String
+  actorRole   String
+  action      String
+  targetType  String
+  targetId    String
+  reason      String?
+  metadata    Json     @default("{}")
+  occurredAt  DateTime @default(now())
+}
+
+model ImpersonationSession {
+  id            String    @id @default(uuid())
+  staffId       String
+  targetUserId  String
+  reason        String
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+}
+
+enum ModerationItemType {
+  review
+  listing
+}
+
+enum ModerationStatus {
+  pending
+  approved
+  removed
+}
+
+model ModerationQueueItem {
+  id              String              @id @default(uuid())
+  itemType        ModerationItemType
+  itemId          String
+  flaggedReason   String
+  status          ModerationStatus    @default(pending)
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime            @default(now())
+}
+
+model UserSuspension {
+  id            String    @id @default(uuid())
+  userId        String
+  reason        String
+  suspendedBy   String
+  suspendedAt   DateTime  @default(now())
+  liftedAt      DateTime?
+  liftedBy      String?
+}
+
+model VehicleSuspension {
+  id            String    @id @default(uuid())
+  vehicleId     String
+  reason        String
+  suspendedBy   String
+  suspendedAt   DateTime  @default(now())
+  liftedAt      DateTime?
+  liftedBy      String?
+}
+
+model TrustScoreOverride {
+  id            String   @id @default(uuid())
+  userId        String
+  previousScore Float
+  newScore      Float
+  reason        String
+  overriddenBy  String
+  occurredAt    DateTime @default(now())
+}
+
+enum IncidentSeverity {
+  p1
+  p2
+  p3
+  p4
+}
+
+enum IncidentStatus {
+  open
+  investigating
+  monitoring
+  resolved
+}
+
+model Incident {
+  id                String           @id @default(uuid())
+  title             String
+  severity          IncidentSeverity
+  status            IncidentStatus   @default(open)
+  description       String
+  affectedServices  String[]
+  createdBy         String
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  resolvedAt        DateTime?
+}
+
+enum AlertComparator {
+  gt
+  gte
+  lt
+  lte
+}
+
+model AlertRule {
+  id              String          @id @default(uuid())
+  name            String
+  metric          String
+  comparator      AlertComparator
+  threshold       Float
+  notifyChannel   String
+  enabled         Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model AlertFiring {
+  id            String   @id @default(uuid())
+  alertRuleId   String
+  observedValue Float
+  firedAt       DateTime @default(now())
+  acknowledgedAt DateTime?
+  acknowledgedBy String?
+}
+
+model FeatureFlag {
+  key         String   @id
+  enabled     Boolean  @default(false)
+  scopeRegion String?
+  description String?
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+}
+
+// Generic keyed config store — e.g. "trust_score.weights", "insurance.base_price_cents".
+model ConfigSetting {
+  key       String   @id
+  value     Json
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+// ------------------------------- Trips (renter booking) -------------------------------
+// Added so a renter can book without a service-role caller: the Trips module orchestrates
+// eligibility, availability, cover, payment authorization and the deposit hold, then records
+// the result here. tripId elsewhere in the schema (payments, deposits, policies) refers to Trip.id.
+
+enum TripStatus {
+  requested
+  confirmed
+  cancelled
+}
+
+model Trip {
+  id              String     @id
+  listingId       String
+  vehicleId       String
+  renterId        String
+  ownerId         String
+  startDate       DateTime
+  endDate         DateTime
+  days            Int
+  currency        String
+  rentalCents     Int
+  coverCents      Int
+  deliveryCents   Int        @default(0)
+  totalCents      Int
+  depositCents    Int
+  coverageTierId  String
+  paymentMethodId String
+  authorizationId String?
+  depositHoldId   String?
+  policyId        String?
+  status          TripStatus @default(requested)
+  cancelledAt     DateTime?
+  cancelledBy     String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([renterId, startDate])
+  @@index([ownerId, startDate])
+  @@index([listingId, status])
+}
