@@ -13,8 +13,10 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  baseUrl: `http://${window.location.hostname}:3000/api/v1`,
-  accessToken: null,
+
+baseUrl:
+  import.meta.env.VITE_API_URL ??
+  `http://${window.location.hostname}:3000/api/v1`,  accessToken: null,
   userId: null,
   role: null,
   setBaseUrl: (url) => set({ baseUrl: url }),
