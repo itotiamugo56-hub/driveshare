@@ -9,6 +9,7 @@ import { Link } from 'react-router-dom';
 import { NearMe } from '../components/NearMe';
 import { HowItWorks } from '../components/RenterHelp';
 import { friendlyError } from '../lib/errors';
+import noResults from '../assets/illus/no-results.webp';
 import type { SearchListingsParams } from '../api/domains/vehicleListing.api';
 
 /**
@@ -88,7 +89,10 @@ export function VehicleHubPage() {
           </>
         )}
         {data && data.results.length === 0 && (
-          <StatusBanner kind="empty" message="No cars match these dates and filters. Widen your dates, raise the price cap, or turn off delivery-only." />
+          <div style={{ textAlign: 'center' }}>
+            <img src={noResults} alt="" width={160} height={160} style={{ borderRadius: 24 }} />
+            <StatusBanner kind="empty" message="No cars match these dates and filters. Widen your dates, raise the price cap, or turn off delivery-only." />
+          </div>
         )}
         {data && data.results.length > 0 && (
           <>

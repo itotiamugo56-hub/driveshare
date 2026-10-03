@@ -11,11 +11,23 @@ export interface OwnerListing {
   instantBookEnabled: boolean; deliveryOptions: { delivery: boolean; radius_km: number; fee: number }; minimumTrustTier?: string | null;
   status: 'draft' | 'active' | 'paused' | 'removed'; vehicle?: OwnerVehicle;
 }
+export type OwnershipState = 'pending' | 'verified' | 'rejected';
+export interface HostingStatus {
+  ownsVehicles: boolean;
+  identityVerified: boolean;
+  licenceValid: boolean;
+  cars: { vehicleId: string; label: string; ownership: OwnershipState; documentSubmitted: boolean }[];
+  canPublish: boolean;
+  nextStep: 'identity' | 'licence' | 'ownership' | 'none';
+}
 export interface VinDecoded { make: string; model: string; year: number; trim?: string }
 
 export interface CalendarDay { date: string; status: 'available' | 'booked' | 'owner_blocked' | 'maintenance_hold' }
 
 export const ownerApi = {
+  hostingStatus: (t?: string | null) => request({ method: 'GET', url: '/hosting/status', token: t }) as Promise<HostingStatus>,
+  uploadOwnershipDoc: (vehicleId: string, documentBase64: string, t?: string | null) =>
+    request({ method: 'POST', url: `/vehicles/${vehicleId}/ownership-documents`, data: { documentBase64 }, token: t }) as Promise<{ ownershipVerificationStatus: OwnershipState }>,
   getCalendar: (listingId: string, t?: string | null) => request({ method: 'GET', url: `/listings/${listingId}/calendar`, token: t }) as Promise<CalendarDay[]>,
   updateCalendar: (listingId: string, entries: { date: string; status: string }[], t?: string | null) => request({ method: 'PUT', url: `/listings/${listingId}/calendar`, data: { entries }, token: t }) as Promise<CalendarDay[]>,
   myVehicles: (t?: string | null) => request({ method: 'GET', url: '/vehicles/mine', token: t }) as Promise<OwnerVehicle[]>,

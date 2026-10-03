@@ -43,6 +43,7 @@ model User {
   paymentMethods       PaymentMethod[]
   consents             ConsentRecord[]
   companyProfile       CompanyProfile?
+  refreshTokens        RefreshToken[]
 }
 
 // Added per explicit product decision (verification-check follow-up, "company/
@@ -1109,4 +1110,25 @@ model Trip {
   @@index([renterId, startDate])
   @@index([ownerId, startDate])
   @@index([listingId, status])
+}
+
+
+// Rotating refresh tokens. Only a SHA-256 hash is stored, never the token. Each
+// token belongs to a "family" (one per login). Using an already-rotated token
+// revokes the whole family, which is how theft of a refresh token is detected.
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  familyId   String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
 }

@@ -3,6 +3,8 @@ import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/auth/jwt-auth.guard';
 import { Public } from '../../common/auth/public.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { AppRole } from '../../common/enums';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../../common/interfaces/request-with-user';
 import { VehicleListingService } from './vehicle-listing.service';
@@ -18,6 +20,7 @@ import {
   AddVehiclePhotoDto,
   ReorderVehiclePhotosDto,
   SearchListingsQueryDto,
+  OwnershipReviewDto,
 } from './dto/vehicle-listing.dto';
 
 @ApiTags('vehicle-listing')
@@ -36,6 +39,19 @@ export class VehicleListingController {
   @Get('vehicles/mine')
   myVehicles(@CurrentUser() user: AuthenticatedUser) {
     return this.svc.myVehicles(user.userId);
+  }
+
+  /** Host standing in one call: owns cars?, vetting steps done, next step. */
+  @Get('hosting/status')
+  hostingStatus(@CurrentUser() user: AuthenticatedUser) {
+    return this.svc.hostingStatus(user.userId);
+  }
+
+  /** Staff decision on an ownership document. */
+  @Roles(AppRole.ADMIN, AppRole.SUPPORT_AGENT)
+  @Put('admin/vehicles/:vehicleId/ownership-review')
+  reviewOwnership(@Param('vehicleId') id: string, @Body() dto: OwnershipReviewDto) {
+    return this.svc.reviewOwnership(id, dto.decision);
   }
 
   @Get('listings/mine')

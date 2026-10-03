@@ -1,5 +1,10 @@
 import axios, { AxiosError, AxiosRequestConfig } from 'axios';
-import { useAuthStore } from '../store/authStore';
+import { useAuthStore, accessTokenStale } from '../store/authStore';
+import { refreshSession } from './refresh';
+
+/** Broadcast when the server ends the session on its own (expired, revoked). The app shell reacts by cleaning up and routing to sign-in. */
+export const SESSION_ENDED_EVENT = 'ds:session-ended';
+const isAuthUrl = (url?: string) => !!url && /\/auth\//.test(url);
 
 export interface ApiError {
   statusCode: number;
@@ -29,7 +34,10 @@ export function normalizeApiError(err: unknown): ApiError {
  */
 export const client = axios.create();
 
-client.interceptors.request.use((config) => {
+client.interceptors.request.use(async (config) => {
+  // Renew a token that is about to expire before sending, so the person never sees a 401 round trip.
+  const pre = useAuthStore.getState();
+  if (pre.refreshToken && !isAuthUrl(config.url) && accessTokenStale(pre) && pre.userId) await refreshSession();
   const { accessToken, baseUrl } = useAuthStore.getState();
   config.baseURL = baseUrl;
   if (accessToken && !config.headers?.['X-Skip-Auth']) {
@@ -39,15 +47,27 @@ client.interceptors.request.use((config) => {
   return config;
 });
 
+type Retriable = AxiosRequestConfig & { _retried?: boolean };
+
 client.interceptors.response.use(
   (res) => res,
-  (err) => {
-    if (axios.isAxiosError(err) && err.response?.status === 401) {
-      // No refresh-token endpoint exists server-side (see architecture doc §1.0) —
-      // a 401 always means "log all the way out", never "silently refresh".
-      // The Test Dashboard intentionally does NOT auto-logout on 401s that are the
-      // *expected* outcome of a role/permission assertion, so this is opt-in per call
-      // via the `expectFailure` flag threaded through request(), not global here.
+  async (err) => {
+    if (axios.isAxiosError(err) && err.response?.status === 401 && err.config) {
+      const cfg = err.config as Retriable;
+      const { refreshToken, userId } = useAuthStore.getState();
+      if (refreshToken && userId && !cfg._retried && !isAuthUrl(cfg.url)) {
+        const outcome = await refreshSession();
+        if (outcome === 'ok') {
+          cfg._retried = true;
+          // The request interceptor stamps the renewed token on the retry.
+          return client.request(cfg);
+        }
+        if (outcome === 'invalid') {
+          useAuthStore.getState().clearSession();
+          window.dispatchEvent(new CustomEvent(SESSION_ENDED_EVENT, { detail: 'expired' }));
+        }
+        // 'network': keep the session; the caller sees the original error and can retry.
+      }
     }
     return Promise.reject(normalizeApiError(err));
   },

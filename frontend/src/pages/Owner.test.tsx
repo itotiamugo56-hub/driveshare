@@ -19,7 +19,7 @@ const o = ownerApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const t = tripsApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const photos = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, url: `data:image/png;base64,${i}`, position: i }));
 const VIN = '1HGCM82633A004352';
-beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); photoState.photos = []; useAuthStore.setState({ userId: 'u1', accessToken: 'tok' }); o.marketPrices.mockResolvedValue([6000, 8000, 9000, 12000]); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); photoState.photos = []; useAuthStore.setState({ userId: 'u1', accessToken: 'tok' }); o.marketPrices.mockResolvedValue([6000, 8000, 9000, 12000]); o.hostingStatus = vi.fn().mockResolvedValue({ ownsVehicles: true, identityVerified: true, licenceValid: true, cars: [], canPublish: true, nextStep: 'none' }); });
 const wizard = (q: string) => renderAt(<ListCarPage />, `/owner/new${q}`, '/owner/new');
 
 describe('List your car: step 1', () => {
@@ -173,4 +173,16 @@ describe('Owner dashboard', () => {
     expect(await screen.findByText(/internet connection/)).toBeInTheDocument(); fireEvent.click(screen.getByRole('button', { name: 'Try again' })); expect(await screen.findByText(/Earn from the car/)).toBeInTheDocument();
   });
   it('signed out goes to sign in', () => { useAuthStore.setState({ userId: null, accessToken: null }); home(); expect(screen.getByText(/elsewhere/)).toBeInTheDocument(); });
+});
+
+describe('Publishing needs vetting', () => {
+  it('keeps the listing as a draft and points to verification until approved', async () => {
+    o.hostingStatus = vi.fn().mockResolvedValue({ ownsVehicles: true, identityVerified: true, licenceValid: true, cars: [], canPublish: false, nextStep: 'ownership' });
+    photoState.photos = photos(3);
+    localStorage.setItem('ds-draft-V', JSON.stringify({ price: '80', locationLabel: 'Nairobi', lat: -1.2, lng: 36.8, description: 'Clean', delivery: false }));
+    wizard('?vehicleId=V&step=preview');
+    const btn = await screen.findByRole('button', { name: /Publish after verification/ });
+    expect(btn).toBeDisabled();
+    expect(screen.getByRole('link', { name: 'Verify' })).toHaveAttribute('href', '/verify');
+  });
 });
