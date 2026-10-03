@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { authApi } from '../api/domains/auth.api';
+import { authApi, toSession } from '../api/domains/auth.api';
+import { useAppStore } from '../store/appStore';
+import { Wordmark } from '../components/Brand';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { errStatus } from '../lib/errors';
 import { useAuthStore } from '../store/authStore';
@@ -8,7 +10,10 @@ import { useAuthStore } from '../store/authStore';
 /** One screen for sign in and sign up. Errors appear next to the field that needs fixing. */
 export function LoginPage() {
   useDocumentTitle('Sign in');
-  const [mode, setMode] = useState<'in' | 'up'>('in');
+  const [sp] = useSearchParams();
+  const [mode, setMode] = useState<'in' | 'up'>(sp.get('mode') === 'up' ? 'up' : 'in');
+  const notice = useAppStore((a) => a.sessionNotice);
+  const setNotice = useAppStore((a) => a.setNotice);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
@@ -16,7 +21,9 @@ export function LoginPage() {
   const [err, setErr] = useState<{ field?: 'email' | 'password'; text: string } | null>(null);
   const setSession = useAuthStore((s) => s.setSession);
   const nav = useNavigate();
-  const next = useSearchParams()[0].get('next') ?? '/';
+  // Only same-site paths are allowed, so a crafted link can't bounce someone to another site after sign-in.
+  const rawNext = sp.get('next') ?? '/';
+  const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/';
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -26,7 +33,9 @@ export function LoginPage() {
     setBusy(true);
     try {
       const res = await (mode === 'in' ? authApi.login : authApi.register)(email, password);
-      setSession({ accessToken: res.accessToken, userId: res.userId, role: res.role });
+      setSession(toSession(res));
+      setNotice(null);
+      useAppStore.getState().completeOnboarding();
       nav(next, { replace: true });
     } catch (ex) {
       const s = errStatus(ex);
@@ -44,6 +53,8 @@ export function LoginPage() {
 
   return (
     <main className="wrap" style={{ maxWidth: 440, paddingTop: 40 }}>
+      {notice === 'expired' && <div className="note warn" role="status">Your session ended, so please sign in again. We kept your place.</div>}
+      <div style={{ marginBottom: 18 }}><Wordmark size={36} /></div>
       <h1 style={{ fontSize: 30 }}>{mode === 'in' ? 'Welcome back' : 'Create your account'}</h1>
       <p>{mode === 'in' ? 'Sign in to see which cars you can book.' : 'It takes a minute. You can browse without one, but you need it to book.'}</p>
       <form onSubmit={submit} noValidate className="sec" style={{ display: 'grid', gap: 12 }}>

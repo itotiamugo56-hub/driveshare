@@ -1,3 +1,4 @@
+import { useCapabilities } from '../hooks/useCapabilities';
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -214,7 +215,7 @@ function StepPrice({ token, f, set, onNext, onBack }: { token: string | null; f:
 }
 
 function StepPreview({ token, vehicleId, vehicle, photoCount, f, set, go }: { token: string | null; vehicleId: string; vehicle: import('../api/schemas/vehicleListing.schemas').Vehicle; photoCount: number; f: DraftForm; set: (p: Partial<DraftForm>) => void; go: (s: StepKey) => void }) {
-  const nav = useNavigate(); const checks = readiness(photoCount, f); const ready = checks.every((c) => c.done); const cents = toCents(f.price) ?? 0;
+  const nav = useNavigate(); const cap = useCapabilities(); const vetBlock = cap.known && !cap.host.canPublish; const checks = readiness(photoCount, f); const ready = checks.every((c) => c.done); const cents = toCents(f.price) ?? 0;
   const fee = Number(f.deliveryFee) || 0;
   const body = { basePriceCents: cents, description: f.description || undefined, locationLabel: f.locationLabel.trim(), locationLat: f.lat, locationLng: f.lng, instantBookEnabled: f.instantBook,
     deliveryOptions: { delivery: f.delivery, radius_km: f.delivery ? Number(f.deliveryRadius) || 10 : 0, fee: f.delivery ? fee : 0 }, minimumTrustTier: f.minTier };
@@ -246,9 +247,11 @@ function StepPreview({ token, vehicleId, vehicle, photoCount, f, set, go }: { to
       <div aria-label="Preview of your listing" onClickCapture={(e) => e.preventDefault()} style={{ maxWidth: 360 }}><VehicleCard listing={preview} /></div>
       <div className="sec"><h2 style={{ fontSize: 18, marginBottom: 6 }}>Before you publish</h2>
         {checks.map((c) => <div key={c.key} className="line"><span>{c.done ? '✓' : '○'} {c.label}</span>{!c.done && <button className="link" onClick={() => go(c.fixStep)}>Fix</button>}</div>)}
+        <div className="line"><span>{vetBlock ? '○' : '✓'} Identity, licence and ownership approved</span>{vetBlock && <Link className="link" to="/verify">Verify</Link>}</div>
         <p className="mut" style={{ marginBottom: 0 }}>{ready ? `Renters pay ${money(cents)} a day plus cover. You earn about ${money(ownerNetCents(cents))} a day.` : 'Finish the items above to publish.'}</p></div>
       {publish.isError && <div className="note warn" role="alert">{serverMessage(publish.error) ?? friendlyError(publish.error, 'your listing')} {f.listingId ? 'Your listing is saved. Tap publish to try again.' : 'Nothing was published. Tap publish to try again.'}</div>}
-      <button className="btn" disabled={!ready || publish.isPending} onClick={() => publish.mutate()}>{publish.isPending ? 'Publishing…' : 'Publish my car'}</button>
+      {ready && vetBlock && <p className="note" role="status" style={{ margin: 0 }}>Your listing is saved as a draft. It goes live as soon as your verification is approved.</p>}
+      <button className="btn" disabled={!ready || publish.isPending || vetBlock} onClick={() => publish.mutate()}>{publish.isPending ? 'Publishing…' : vetBlock ? 'Publish after verification' : 'Publish my car'}</button>
       <p className="note" style={{ margin: 0 }}>You can pause or edit your listing at any time from your dashboard.</p>
       <button className="link" onClick={() => go('price')} style={{ justifySelf: 'start' }}>← Back</button>
     </section>

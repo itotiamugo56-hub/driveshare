@@ -1,4 +1,6 @@
-import { createBrowserRouter } from 'react-router-dom';
+import { createBrowserRouter, redirect, type LoaderFunctionArgs } from 'react-router-dom';
+import { useAuthStore } from './store/authStore';
+import { useAppStore } from './store/appStore';
 import { VehicleHubPage } from './pages/VehicleHubPage';
 import { ListingDetailPage } from './pages/ListingDetailPage';
 import { VehiclePhotoManagerPage } from './pages/VehiclePhotoManagerPage';
@@ -18,6 +20,31 @@ import { EditListingPage } from './pages/EditListingPage';
 import { LoginPage } from './pages/LoginPage';
 import { Layout } from './components/SiteHeader';
 import { NotFoundPage } from './pages/NotFoundPage';
+
+/** Sends signed-out visitors to sign-in and brings them back to the page they asked for. */
+export const requireAuth = ({ request }: LoaderFunctionArgs) => {
+  if (!useAuthStore.getState().userId) {
+    const u = new URL(request.url);
+    throw redirect(`/login?next=${encodeURIComponent(u.pathname + u.search)}`);
+  }
+  return null;
+};
+
+/**
+ * Launch routing for the home page:
+ *  - signed in: straight in, reopening the area they used last
+ *  - signed out and never seen the welcome flow (or signed out on purpose): welcome
+ *  - signed out and already onboarded (e.g. session expired): the app, browsable as a visitor
+ */
+export const homeLoader = ({ request }: LoaderFunctionArgs) => {
+  const { userId } = useAuthStore.getState();
+  const { onboarded, lastWorkspace } = useAppStore.getState();
+  const url = new URL(request.url);
+  if (userId) return lastWorkspace === 'host' && url.search === '' && !url.hash ? redirect('/owner') : null;
+  // Search links and shared URLs are never interrupted by onboarding.
+  if (!onboarded && url.search === '') throw redirect('/welcome');
+  return null;
+};
 
 /**
  * Audit gap addressed: no routing library or route tree existed — `App.tsx`
@@ -41,24 +68,29 @@ export const router = createBrowserRouter([
     element: <Layout />,
     errorElement: <RouteError />,
     children: [
-      { path: '/', element: <VehicleHubPage /> },
-      { path: '/verify', element: <VerifyPage /> },
+      { path: '/', element: <VehicleHubPage />, loader: homeLoader },
+      { path: '/host', lazy: async () => ({ Component: (await import('./pages/HostPitchPage')).HostPitchPage }) },
+      { path: '/verify', element: <VerifyPage />, loader: requireAuth },
       { path: '/compare', element: <ComparePage /> },
-      { path: '/trips', element: <TripsPage /> },
-      { path: '/trips/:tripId', element: <TripDetailPage /> },
-      { path: '/owner', element: <OwnerHomePage /> },
-      { path: '/owner/cars/:listingId', element: <EditListingPage /> },
-      { path: '/owner/new', element: <ListCarPage /> },
+      { path: '/trips', element: <TripsPage />, loader: requireAuth },
+      { path: '/trips/:tripId', element: <TripDetailPage />, loader: requireAuth },
+      { path: '/owner', element: <OwnerHomePage />, loader: requireAuth },
+      { path: '/owner/cars/:listingId', element: <EditListingPage />, loader: requireAuth },
+      { path: '/owner/new', element: <ListCarPage />, loader: requireAuth },
       { path: '/saved', element: <SavedPage /> },
       { path: '/login', element: <LoginPage /> },
       { path: '/listings/:listingId', element: <ListingDetailPage /> },
       { path: '/listings/:listingId/checkout', element: <CheckoutPage /> },
-      { path: '/owner/vehicles/:vehicleId/photos', element: <VehiclePhotoManagerPage /> },
+      { path: '/owner/vehicles/:vehicleId/photos', element: <VehiclePhotoManagerPage />, loader: requireAuth },
       { path: '/users/:userId', element: <UserProfilePage /> },
       { path: '/companies/:companyProfileId', element: <CompanyProfilePage /> },
-      { path: '/owner/company-profile', element: <ManageCompanyProfilePage /> },
+      { path: '/owner/company-profile', element: <ManageCompanyProfilePage />, loader: requireAuth },
       { path: '*', element: <NotFoundPage /> },
     ],
   },
-  { path: '/dev/tests', lazy: async () => ({ Component: (await import('./test-dashboard/TestDashboardPage')).TestDashboardPage }) },
+  { path: '/welcome', lazy: async () => ({ Component: (await import('./pages/WelcomePage')).WelcomePage }), errorElement: <RouteError /> },
+  // The API test runner accepts admin credentials, so it only exists in development builds.
+  ...(import.meta.env.DEV
+    ? [{ path: '/dev/tests', lazy: async () => ({ Component: (await import('./test-dashboard/TestDashboardPage')).TestDashboardPage }) }]
+    : []),
 ]);

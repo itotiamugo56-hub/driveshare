@@ -129,6 +129,16 @@ export async function runVehicleListing(ctx: TestContext) {
   const updateListingAsRenter = await testRequest({ method: 'PUT', url: `/listings/${ctx.listingId}`, data: { status: 'active' }, token: renter });
   assert(updateListingAsRenter.status === 403, "Non-owner CANNOT activate someone else's listing", `status=${updateListingAsRenter.status}`);
 
+  // Host vetting gate: a pending ownership document blocks publishing until staff approve it.
+  const blockedActivate = await testRequest({ method: 'PUT', url: `/listings/${ctx.listingId}`, data: { status: 'active' }, token: owner });
+  assert(blockedActivate.status === 403 && JSON.stringify(blockedActivate.body).includes('HOST_VETTING_REQUIRED'), 'Publishing is blocked while ownership is unverified', `status=${blockedActivate.status}`);
+  const reviewAsOwner = await testRequest({ method: 'PUT', url: `/admin/vehicles/${ctx.vehicleId}/ownership-review`, data: { decision: 'verified' }, token: owner });
+  assert(reviewAsOwner.status === 403, 'Owner CANNOT approve their own ownership document', `status=${reviewAsOwner.status}`);
+  const reviewAsAdmin = await testRequest({ method: 'PUT', url: `/admin/vehicles/${ctx.vehicleId}/ownership-review`, data: { decision: 'verified' }, token: ctx.adminToken });
+  assertField(reviewAsAdmin.body, 'ownershipVerificationStatus', 'verified', 'Staff approve the ownership document');
+  const hostStatus = await testRequest({ method: 'GET', url: '/hosting/status', token: owner });
+  assertField(hostStatus.body, 'ownsVehicles', true, 'Hosting status reports the owner owns vehicles');
+
   const activateListing = await testRequest({
     method: 'PUT',
     url: `/listings/${ctx.listingId}`,

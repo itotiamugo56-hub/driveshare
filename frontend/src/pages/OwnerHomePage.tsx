@@ -7,6 +7,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { friendlyError, serverMessage } from '../lib/errors';
 import { money, ownerNetCents } from '../lib/owner';
 import { StatusBanner } from '../components/StatusBanner';
+import { useCapabilities } from '../hooks/useCapabilities';
 
 const fmt = (d: string) => new Date(d).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const TIER: Record<string, string> = { new: 'New', standard: 'Standard', trusted: 'Trusted', elite: 'Elite' };
@@ -17,6 +18,7 @@ export function OwnerHomePage() {
   const { userId, accessToken: token } = useAuthStore();
   const qc = useQueryClient();
   const on = !!userId;
+  const cap = useCapabilities();
   const listings = useQuery({ queryKey: ['owner-listings', userId], queryFn: () => ownerApi.myListings(token), enabled: on });
   const vehicles = useQuery({ queryKey: ['owner-vehicles', userId], queryFn: () => ownerApi.myVehicles(token), enabled: on });
   const trips = useQuery({ queryKey: ['my-trips', userId], queryFn: () => tripsApi.mine(token), enabled: on });
@@ -51,6 +53,12 @@ export function OwnerHomePage() {
   return (
     <main className="wrap" style={{ maxWidth: 760, paddingTop: 24 }}>
       <h1 style={{ fontSize: 28 }}>Your cars</h1>
+      {cap.hostNeedsAction && (
+        <section className="note warn" role="status" style={{ marginTop: 12 }}>
+          <b>{cap.host.nextStep === 'identity' ? 'Confirm your identity to go live.' : cap.host.nextStep === 'licence' ? 'Add your driving licence to go live.' : 'We need proof the car is yours before it can go live.'}</b>{' '}
+          <Link to="/verify">Continue verification</Link>
+        </section>
+      )}
       <section className="sec" style={{ background: 'var(--deep)', color: '#fff', border: 0 }}>
         <div style={{ color: '#BFE0E0', fontSize: 13 }}>Booked this month, after our 15% fee</div>
         <div style={{ fontSize: 34, fontWeight: 800 }}>{money(monthNet)}</div>

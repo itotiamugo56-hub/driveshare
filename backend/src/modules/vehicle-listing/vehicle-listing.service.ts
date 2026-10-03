@@ -243,6 +243,7 @@ export class VehicleListingService {
   async updateListing(listingId: string, callerId: string, data: any) {
     const listing = await this.getListing(listingId);
     if (listing.ownerId !== callerId) throw new ForbiddenException('Only the listing owner may update it');
+    if (data.status === 'active') await this.assertCanPublish(callerId, listing.vehicleId);
     const updated = await this.prisma.listing.update({ where: { id: listingId }, data });
     if (data.status === 'active') {
       this.events.publish(EVT.LISTING_PUBLISHED, { listingId, ownerId: listing.ownerId });
@@ -436,5 +437,83 @@ export class VehicleListingService {
     }
     this.events.publish(EVT.CALENDAR_UPDATED, { listingId, entryCount: results.length });
     return results;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Host vetting
+  // ---------------------------------------------------------------------------
+
+  /** Set ENFORCE_HOST_VETTING=false to switch the publish gate off (local smoke tests only). */
+  private vettingEnforced() {
+    return (process.env.ENFORCE_HOST_VETTING ?? 'true').toLowerCase() !== 'false';
+  }
+
+  /** Owner-level checks that apply to every vehicle: verified identity and a valid, unexpired licence. */
+  private async ownerChecks(userId: string) {
+    const [session, license] = await Promise.all([
+      this.prisma.verificationSession.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } }),
+      this.prisma.licenseRecord.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } }),
+    ]);
+    const identity = session?.status === 'approved';
+    const licence = !!license && license.dmvValidationStatus === 'valid' && license.expirationDate.getTime() > Date.now();
+    return { identity, licence };
+  }
+
+  /** Throws a 403 that names the first unmet requirement, so the UI can send the owner to the right step. */
+  async assertCanPublish(ownerId: string, vehicleId: string) {
+    if (!this.vettingEnforced()) return;
+    const [{ identity, licence }, vehicle] = await Promise.all([
+      this.ownerChecks(ownerId),
+      this.prisma.vehicle.findUnique({ where: { id: vehicleId } }),
+    ]);
+    if (!identity) throw new ForbiddenException('HOST_VETTING_REQUIRED: confirm your identity before going live');
+    if (!licence) throw new ForbiddenException('HOST_VETTING_REQUIRED: add a valid driving licence before going live');
+    if (!vehicle || vehicle.ownershipVerificationStatus !== 'verified') {
+      throw new ForbiddenException('HOST_VETTING_REQUIRED: this car\'s ownership document has not been approved yet');
+    }
+  }
+
+  /**
+   * One call that tells the front end who this person is as a host: whether they own cars,
+   * which vetting steps are done, and what to do next. Drives navigation and the verification centre.
+   */
+  async hostingStatus(userId: string) {
+    const [vehicles, { identity, licence }] = await Promise.all([
+      this.prisma.vehicle.findMany({
+        where: { ownerId: userId },
+        select: { id: true, make: true, model: true, year: true, ownershipVerificationStatus: true, ownershipDocTokenRef: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.ownerChecks(userId),
+    ]);
+    const cars = vehicles.map((v) => ({
+      vehicleId: v.id,
+      label: `${v.year} ${v.make} ${v.model}`,
+      ownership: v.ownershipVerificationStatus as 'pending' | 'verified' | 'rejected',
+      documentSubmitted: !!v.ownershipDocTokenRef,
+    }));
+    const anyOwnershipVerified = cars.some((c) => c.ownership === 'verified');
+    const needsDoc = cars.find((c) => !c.documentSubmitted || c.ownership === 'rejected');
+    let nextStep: 'identity' | 'licence' | 'ownership' | 'none' = 'none';
+    if (cars.length > 0) {
+      if (!identity) nextStep = 'identity';
+      else if (!licence) nextStep = 'licence';
+      else if (needsDoc || !anyOwnershipVerified) nextStep = 'ownership';
+    }
+    return {
+      ownsVehicles: cars.length > 0,
+      identityVerified: identity,
+      licenceValid: licence,
+      cars,
+      canPublish: identity && licence && anyOwnershipVerified,
+      nextStep,
+    };
+  }
+
+  /** Staff decision on an uploaded ownership document. */
+  async reviewOwnership(vehicleId: string, decision: 'verified' | 'rejected') {
+    const vehicle = await this.getVehicle(vehicleId);
+    if (!vehicle.ownershipDocTokenRef) throw new BadRequestException('No ownership document has been uploaded for this vehicle');
+    return this.prisma.vehicle.update({ where: { id: vehicleId }, data: { ownershipVerificationStatus: decision } });
   }
 }

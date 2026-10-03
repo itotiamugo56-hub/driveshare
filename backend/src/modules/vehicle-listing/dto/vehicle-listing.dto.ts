@@ -97,3 +97,7 @@ export class SearchListingsQueryDto {
 export class UpdateCalendarDto {
   @IsArray() entries: { date: string; status: 'available' | 'booked' | 'owner_blocked' | 'maintenance_hold' }[];
 }
+
+export class OwnershipReviewDto {
+  @IsIn(['verified', 'rejected']) decision: 'verified' | 'rejected';
+}

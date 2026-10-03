@@ -8,6 +8,9 @@ import { fileToBase64 } from '../lib/imageFile';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { friendlyError } from '../lib/errors';
 import { StatusBanner } from '../components/StatusBanner';
+import { ownerApi, type OwnershipState } from '../api/domains/owner.api';
+import { useCapabilities } from '../hooks/useCapabilities';
+import verifyArt from '../assets/illus/verify-pending.webp';
 
 interface Status { identityVerified: boolean; licenseStatus: string; licenseExpiresAt: string | null; drivingRiskTier: string | null; reverificationDue: boolean | null }
 interface Session { id: string; status: string; rejectionReason?: string | null }
@@ -20,7 +23,8 @@ export function VerifyPage() {
   const status = useQuery({ queryKey: ['id-status', userId], enabled: !!userId, queryFn: () => identityApi.getConsolidatedStatus(userId!, token) as Promise<Status> });
   const score = useQuery({ queryKey: ['trust-score', userId], enabled: !!userId, retry: 0,
     queryFn: () => trustApi.getScore(userId!, token) as Promise<{ overallScore: number; tier: string }> });
-  const refresh = () => { qc.invalidateQueries({ queryKey: ['id-status'] }); qc.invalidateQueries({ queryKey: ['trust-score'] }); };
+  const cap = useCapabilities();
+  const refresh = () => { qc.invalidateQueries({ queryKey: ['id-status'] }); qc.invalidateQueries({ queryKey: ['trust-score'] }); qc.invalidateQueries({ queryKey: ['hosting-status'] }); };
 
   if (!userId) return <Navigate to="/login?next=/verify" replace />;
   if (status.isLoading) return <div className="wrap"><div className="skel" style={{ marginTop: 24 }} aria-busy="true" /></div>;
@@ -43,8 +47,53 @@ export function VerifyPage() {
         <LicenseForm token={token} onDone={refresh} /></Step>
       <Step n={3} title="Share your driving record (optional)" ok={!!s.drivingRiskTier} why="A clean record can raise your level and open more cars. You choose whether to share it.">
         <HistoryForm token={token} onDone={refresh} /></Step>
-      <p><Link to="/">Back to cars</Link></p>
+      {cap.owns && <HostVetting cars={cap.host.cars} identity={s.identityVerified} licence={licenseOk} token={token} onDone={refresh} />}
+      <p><Link to={cap.owns ? '/owner' : '/'}>{cap.owns ? 'Back to my dashboard' : 'Back to cars'}</Link></p>
     </main>
+  );
+}
+
+const OWN_LABEL: Record<OwnershipState, string> = { pending: 'In review', verified: 'Approved', rejected: 'Needs a new document' };
+
+/** The host half of verification: each car needs an ownership document that staff approve before it can go live. */
+function HostVetting({ cars, identity, licence, token, onDone }: { cars: { vehicleId: string; label: string; ownership: OwnershipState; documentSubmitted: boolean }[]; identity: boolean; licence: boolean; token: string | null; onDone: () => void }) {
+  const ready = identity && licence;
+  return (
+    <section className="sec" style={{ marginTop: 22 }} aria-labelledby="hv-h">
+      <h2 id="hv-h" style={{ fontSize: 20 }}>For hosting: prove your car is yours</h2>
+      <p style={{ margin: '4px 0 10px' }}>Upload the registration or logbook for each car. We check it against the VIN and plate, then your car can go live. Your ID and licence above count for hosting too.</p>
+      {!ready && <p className="note warn" role="status">Finish steps 1 and 2 first. A car can only go live once both are done.</p>}
+      <div style={{ display: 'grid', gap: 10 }}>
+        {cars.map((c) => <OwnershipRow key={c.vehicleId} car={c} token={token} onDone={onDone} />)}
+      </div>
+    </section>
+  );
+}
+
+function OwnershipRow({ car, token, onDone }: { car: { vehicleId: string; label: string; ownership: OwnershipState; documentSubmitted: boolean }; token: string | null; onDone: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const send = useMutation({
+    mutationFn: async () => ownerApi.uploadOwnershipDoc(car.vehicleId, (await fileToBase64(file!)).base64, token),
+    onSuccess: () => { setFile(null); onDone(); },
+  });
+  const inReview = car.documentSubmitted && car.ownership === 'pending';
+  return (
+    <div className="line" style={{ alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+      <div style={{ flex: '1 1 200px' }}>
+        <b style={{ color: 'var(--text-h)' }}>{car.label}</b>
+        <div><span className={`pill ${car.ownership === 'verified' ? 'tier-trusted' : 'tier-new'}`}>{car.documentSubmitted || car.ownership !== 'pending' ? OWN_LABEL[car.ownership] : 'Document needed'}</span></div>
+        {inReview && <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 8 }}><img src={verifyArt} alt="" width={56} height={56} /><small>We are checking it. This usually doesn't take long.</small></div>}
+      </div>
+      {car.ownership !== 'verified' && !inReview && (
+        <div style={{ display: 'grid', gap: 8, flex: '1 1 220px' }}>
+          <label className="mut" style={{ fontSize: 13 }}>Registration or logbook (photo or PDF)
+            <input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          </label>
+          <button className="btn" disabled={!file || send.isPending} onClick={() => send.mutate()}>{send.isPending ? 'Uploading…' : car.ownership === 'rejected' ? 'Upload a new document' : 'Upload document'}</button>
+          {send.isError && <p className="note warn" role="alert" style={{ margin: 0 }}>{friendlyError(send.error, 'your document')}</p>}
+        </div>
+      )}
+    </div>
   );
 }
 
